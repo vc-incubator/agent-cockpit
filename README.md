@@ -114,7 +114,7 @@ Locally:
 npm test
 ```
 
-591 tests, no dependencies to install. They cover the data logic, the fire endpoint's auth, and —
+598 tests, no dependencies to install. They cover the data logic, the fire endpoint's auth, and —
 since a regex over the page source proves nothing about what a person sees — a harness that renders
 all seven screens and asserts on the actual output.
 
