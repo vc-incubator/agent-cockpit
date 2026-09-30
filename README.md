@@ -78,7 +78,7 @@ has no evidence for.
 | `GITHUB_TOKEN` | A read-only token. **Required if your team repo is private** | If private |
 | `VIEW_KEY` | A password for the board. Send it as the `x-view-key` header | **Yes**, unless… |
 | `PUBLIC_DASHBOARD` | `true` to skip the key entirely — only if the repo is genuinely public | No |
-| `FIRE_TRIGGERS` | JSON mapping job slug → its trigger URL. Needed for the Run buttons. **Include `task-intake`** — a routine, not a job — or Add task, New workflow, Arm and Approve all fail | For buttons |
+| `FIRE_TRIGGERS` | JSON mapping job slug → its routine's API trigger, as `{"url": "...", "token": "..."}`. Both come from the routine's **API** trigger at claude.ai/code/routines, and the token is shown once. A bare URL still works for a receiver that needs no token. Needed for the Run buttons. **Include `task-intake`** — a routine, not a job — or Add task, New workflow, Arm and Approve all fail | For buttons |
 | `FIRE_KEY` | A password for firing jobs, sent as `x-fire-key` | For buttons |
 | `PUBLIC_FIRE` | `true` to drop `FIRE_KEY` for requests from your own page. **Read the warning below first** | No |
 
@@ -114,7 +114,7 @@ Locally:
 npm test
 ```
 
-591 tests, no dependencies to install. They cover the data logic, the fire endpoint's auth, and —
+597 tests, no dependencies to install. They cover the data logic, the fire endpoint's auth, and —
 since a regex over the page source proves nothing about what a person sees — a harness that renders
 all seven screens and asserts on the actual output.
 
@@ -133,6 +133,7 @@ all seven screens and asserts on the actual output.
 | A job says **UNAPPROVED** | Something is firing that your files say is off. It is spending runs nobody approved |
 | **No hero number yet** | Your `tiles.yml` names a metric nothing computes, or your ledger has no hours in it. The sentence says which |
 | Run buttons do nothing | `FIRE_TRIGGERS` is unset, or that job has no `fire: true` in its trigger block |
+| A Run button says the routine has **no token**, or **refused its token (401)** | Each routine has its own token. Generate it on the routine's API trigger, put it in that job's `FIRE_TRIGGERS` entry as `{"url": "...", "token": "..."}`, and redeploy. Generating a new token revokes the old one |
 | Add task, New workflow, Arm or Approve answer "No \"task-intake\" routine is registered" | Those four dispatch to one dedicated routine rather than to a job, so `task-intake` needs its own entry in `FIRE_TRIGGERS`. It is not a workflow slug and wiring every workflow does not supply it |
 | The board looks empty but the repo is fine | Check the branch. `GITHUB_BRANCH` defaults to `main` |
 
