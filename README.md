@@ -11,7 +11,7 @@ to your repo.
 
 ## Who this is for
 
-Anyone using [agent-team-template](https://github.com/AutomatedMarketer/agent-team-template) who
+Anyone using [agent-team-template](https://github.com/vc-incubator/agent-team-template) who
 would rather glance at a page than read files.
 
 **Nothing depends on this working.** Your agents run whether or not the board is up. It is the
