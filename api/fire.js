@@ -44,7 +44,7 @@ export function isValidSlug(slug) {
 import { keysMatch, TASK_STATUSES } from './lib.js'
 export { keysMatch, TASK_STATUSES }
 
-// FIRE_TRIGGERS must be a JSON object of slug → https URL. Anything else reads as
+// FIRE_TRIGGERS must be a JSON object of slug → https URL or { url, token }. Anything else reads as
 // "not configured" — never as "open".
 export function parseTriggers(raw) {
   if (typeof raw !== 'string' || !raw.trim()) return null
@@ -56,6 +56,31 @@ export function parseTriggers(raw) {
   }
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null
   return parsed
+}
+
+// One FIRE_TRIGGERS entry, as { url, token }, or null when it cannot be dispatched to.
+//
+// A bare https URL is still accepted, for a receiver that needs no credential. A Claude Code
+// routine does: its API trigger answers 401 without `Authorization: Bearer <token>`, and each
+// routine has its own token, shown once when it is generated. Every Run tap failed until the
+// token had somewhere to live, so an entry can also be { "url": "https://...", "token": "..." }.
+export const ROUTINE_FIRE_HOST = 'api.anthropic.com'
+
+export function triggerFor(entry) {
+  const url = typeof entry === 'string' ? entry : entry?.url
+  if (typeof url !== 'string' || !/^https:\/\//.test(url)) return null
+  const token = typeof entry?.token === 'string' && entry.token.trim() ? entry.token.trim() : null
+  return { url, token }
+}
+
+// What goes on the wire. The routine endpoint reads one body field, `text`, and ignores the
+// rest, so the payload travels inside it as JSON; the same fields stay at the top level for
+// any other receiver that reads them there. `anthropic-version` is required by the endpoint
+// and harmless to anything else.
+export function fireRequest(trigger, payload) {
+  const headers = { 'Content-Type': 'application/json', 'anthropic-version': '2023-06-01' }
+  if (trigger.token) headers.Authorization = `Bearer ${trigger.token}`
+  return { headers, body: JSON.stringify({ ...payload, text: JSON.stringify(payload) }) }
 }
 
 // The payload each action sends to the trigger URL. Pause is a dispatch too: the AGENT
@@ -336,7 +361,7 @@ export function creationDispatchPayload(kind, item) {
 const SESSION_URL_HOSTS = ['claude.ai']
 
 export function sessionUrlFrom(result) {
-  for (const key of ['sessionUrl', 'session_url', 'url']) {
+  for (const key of ['claude_code_session_url', 'sessionUrl', 'session_url', 'url']) {
     const value = result?.[key]
     if (typeof value !== 'string' || !/^https:\/\//.test(value)) continue
     let host
@@ -477,8 +502,8 @@ export default async function handler(request, response) {
     }
     const task = checked.task
 
-    const taskTrigger = triggers[TASK_INTAKE_SLUG]
-    if (typeof taskTrigger !== 'string' || !/^https:\/\//.test(taskTrigger)) {
+    const taskTrigger = triggerFor(triggers[TASK_INTAKE_SLUG])
+    if (!taskTrigger) {
       response.status(404).json({
         error:
           `No "${TASK_INTAKE_SLUG}" routine is registered, so the dashboard cannot file ` +
@@ -540,8 +565,8 @@ export default async function handler(request, response) {
       return
     }
 
-    const creationTrigger = triggers[TASK_INTAKE_SLUG]
-    if (typeof creationTrigger !== 'string' || !/^https:\/\//.test(creationTrigger)) {
+    const creationTrigger = triggerFor(triggers[TASK_INTAKE_SLUG])
+    if (!creationTrigger) {
       response.status(404).json({
         error:
           `No "${TASK_INTAKE_SLUG}" routine is registered, so the dashboard cannot create a ` +
@@ -580,8 +605,8 @@ export default async function handler(request, response) {
     }
     const move = checked.move
 
-    const moveTrigger = triggers[TASK_INTAKE_SLUG]
-    if (typeof moveTrigger !== 'string' || !/^https:\/\//.test(moveTrigger)) {
+    const moveTrigger = triggerFor(triggers[TASK_INTAKE_SLUG])
+    if (!moveTrigger) {
       response.status(404).json({
         error:
           `No "${TASK_INTAKE_SLUG}" routine is registered, so the dashboard cannot change a ` +
@@ -631,8 +656,8 @@ export default async function handler(request, response) {
       return
     }
 
-    const armTrigger = triggers[TASK_INTAKE_SLUG]
-    if (typeof armTrigger !== 'string' || !/^https:\/\//.test(armTrigger)) {
+    const armTrigger = triggerFor(triggers[TASK_INTAKE_SLUG])
+    if (!armTrigger) {
       response.status(404).json({
         error:
           `No "${TASK_INTAKE_SLUG}" routine is registered, so the dashboard cannot arm jobs. ` +
@@ -662,8 +687,8 @@ export default async function handler(request, response) {
       return
     }
 
-    const approveTrigger = triggers[TASK_INTAKE_SLUG]
-    if (typeof approveTrigger !== 'string' || !/^https:\/\//.test(approveTrigger)) {
+    const approveTrigger = triggerFor(triggers[TASK_INTAKE_SLUG])
+    if (!approveTrigger) {
       response.status(404).json({
         error:
           `No "${TASK_INTAKE_SLUG}" routine is registered, so the dashboard cannot record ` +
@@ -694,8 +719,8 @@ export default async function handler(request, response) {
     return
   }
 
-  const triggerUrl = triggers[slug]
-  if (typeof triggerUrl !== 'string' || !/^https:\/\//.test(triggerUrl)) {
+  const triggerUrl = triggerFor(triggers[slug])
+  if (!triggerUrl) {
     response.status(404).json({
       error:
         `No trigger is registered for "${slug}". Add its trigger URL to the FIRE_TRIGGERS ` +
@@ -753,17 +778,41 @@ export default async function handler(request, response) {
 // anything the trigger said (its body is not ours to relay), never user text. The label in
 // the message is a validated slug ("monday-brief", "task-intake"), nothing user-typed.
 // Returns the trigger's parsed JSON (or {}), or null after writing the error response.
-async function dispatchToTrigger(triggerUrl, payload, label, response) {
+async function dispatchToTrigger(trigger, payload, label, response) {
+  let host = ''
+  try {
+    host = new URL(trigger.url).hostname
+  } catch {}
+  if (host === ROUTINE_FIRE_HOST && !trigger.token) {
+    response.status(502).json({
+      error:
+        `The trigger for "${label}" is a Claude Code routine with no token, so it would refuse ` +
+        'the dispatch. Generate one on the routine\'s API trigger at claude.ai/code/routines, ' +
+        `set its FIRE_TRIGGERS entry to {"url": "...", "token": "..."} and redeploy.`
+    })
+    return null
+  }
+
   let upstream
   try {
-    upstream = await fetch(triggerUrl, {
+    const { headers, body } = fireRequest(trigger, payload)
+    upstream = await fetch(trigger.url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
+      headers,
+      body,
       signal: AbortSignal.timeout(TRIGGER_TIMEOUT_MS)
     })
   } catch {
     response.status(502).json({ error: `The trigger for "${label}" did not respond in time.` })
+    return null
+  }
+
+  if (upstream.status === 401) {
+    response.status(502).json({
+      error:
+        `The trigger for "${label}" refused its token (status 401). The token may have been ` +
+        'regenerated or revoked: copy a new one from the routine\'s API trigger and redeploy.'
+    })
     return null
   }
 

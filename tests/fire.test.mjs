@@ -9,6 +9,8 @@ import handler, {
   parseTriggers,
   dispatchPayload,
   sessionUrlFrom,
+  triggerFor,
+  fireRequest,
   validateTask,
   taskDispatchPayload,
   validateCreation,
@@ -891,3 +893,97 @@ for (const kind of ['skill', 'agent']) {
       'an interpolated noun left "a agent" in the text a session reads')
   })
 }
+
+// --- a Claude Code routine needs its token --------------------------------------------------
+//
+// Found on a live student install (2026-09-24): every Run tap came back "rejected the dispatch".
+// A routine's API trigger answers 401 without `Authorization: Bearer <token>`, requires
+// `anthropic-version`, reads only a `text` field from the body, and names the session
+// `claude_code_session_url`. The dispatch sent none of that. Checked against
+// platform.claude.com/docs/en/api/claude-code/routines-fire on 2026-09-28.
+
+const ROUTINE_URL = 'https://api.anthropic.com/v1/claude_code/routines/trig_01SuperSecretPath/fire'
+const ROUTINE_TOKEN = 'sk-ant-oat01-thisMustNeverLeaveTheServer'
+const routineTriggers = (entry) => JSON.stringify({ 'monday-brief': entry, 'task-intake': entry })
+
+const assertNoRoutineSecrets = (response) => {
+  const text = JSON.stringify(response.body)
+  assert.ok(!text.includes('sk-ant-'), 'the routine token leaked')
+  assert.ok(!text.includes('SuperSecretPath'), 'the routine URL leaked')
+}
+
+test('a trigger entry is a bare https URL or { url, token }, and nothing else', () => {
+  assert.deepEqual(triggerFor('https://x.example/h'), { url: 'https://x.example/h', token: null })
+  assert.deepEqual(triggerFor({ url: ROUTINE_URL, token: ` ${ROUTINE_TOKEN} ` }), { url: ROUTINE_URL, token: ROUTINE_TOKEN })
+  assert.deepEqual(triggerFor({ url: ROUTINE_URL }), { url: ROUTINE_URL, token: null })
+  for (const bad of ['http://x.example', { token: ROUTINE_TOKEN }, { url: 42 }, null, undefined, 7]) {
+    assert.equal(triggerFor(bad), null, `${JSON.stringify(bad)} should not be dispatchable`)
+  }
+})
+
+test('the request carries the token, the version, and the payload inside `text`', () => {
+  const { headers, body } = fireRequest({ url: ROUTINE_URL, token: ROUTINE_TOKEN }, { action: 'run', workflow: 'monday-brief' })
+  assert.equal(headers.Authorization, `Bearer ${ROUTINE_TOKEN}`)
+  assert.equal(headers['anthropic-version'], '2023-06-01')
+  assert.equal(headers['Content-Type'], 'application/json')
+  const sent = JSON.parse(body)
+  assert.deepEqual(JSON.parse(sent.text), { action: 'run', workflow: 'monday-brief' },
+    'the routine reads only `text`, so the action has to travel in it')
+  assert.equal(sent.workflow, 'monday-brief', 'other receivers still find the fields where they were')
+  assert.equal(fireRequest({ url: 'https://x.example', token: null }, {}).headers.Authorization, undefined,
+    'no token, no Authorization header')
+})
+
+test('Run on a routine sends its token and returns the session it started', async () => {
+  const { response, calls } = await fire(withKey({ workflow: 'monday-brief' }), {
+    env: { FIRE_TRIGGERS: routineTriggers({ url: ROUTINE_URL, token: ROUTINE_TOKEN }) },
+    trigger: {
+      status: 200,
+      body: JSON.stringify({
+        type: 'routine_fire',
+        claude_code_session_id: 'session_01ABC',
+        claude_code_session_url: 'https://claude.ai/code/session_01ABC'
+      })
+    }
+  })
+  assert.equal(response.statusCode, 200)
+  assert.equal(response.body.sessionUrl, 'https://claude.ai/code/session_01ABC',
+    'the session link the routine returns was dropped, so the Watch link never appears')
+  assert.equal(calls.trigger.length, 1)
+  assert.equal(calls.trigger[0].options.headers.Authorization, `Bearer ${ROUTINE_TOKEN}`)
+  assert.equal(calls.trigger[0].options.headers['anthropic-version'], '2023-06-01')
+  assertNoRoutineSecrets(response)
+})
+
+test('a routine with no token is refused before the call, in words that say what to add', async () => {
+  const { response, calls } = await fire(withKey({ workflow: 'monday-brief' }), {
+    env: { FIRE_TRIGGERS: routineTriggers(ROUTINE_URL) }
+  })
+  assert.equal(response.statusCode, 502)
+  assert.equal(calls.trigger.length, 0, 'a call that can only return 401 was made anyway')
+  assert.match(response.body.error, /no token/i)
+  assert.match(response.body.error, /FIRE_TRIGGERS/)
+  assertNoRoutineSecrets(response)
+})
+
+test('a refused token says so, rather than blaming the URL', async () => {
+  const { response } = await fire(withKey({ workflow: 'monday-brief' }), {
+    env: { FIRE_TRIGGERS: routineTriggers({ url: ROUTINE_URL, token: ROUTINE_TOKEN }) },
+    trigger: { status: 401, body: '{"type":"error","error":{"type":"authentication_error"}}' }
+  })
+  assert.equal(response.statusCode, 502)
+  assert.match(response.body.error, /token/i)
+  assert.match(response.body.error, /401/)
+  assertNoRoutineSecrets(response)
+})
+
+test('task intake on a routine carries the token too', async () => {
+  const { response, calls } = await fire(withKey({ action: 'task', title: 'Chase the Acme invoice' }), {
+    env: { FIRE_TRIGGERS: routineTriggers({ url: ROUTINE_URL, token: ROUTINE_TOKEN }) },
+    trigger: { status: 200, body: '{}' }
+  })
+  assert.equal(response.statusCode, 200)
+  assert.equal(calls.trigger[0].options.headers.Authorization, `Bearer ${ROUTINE_TOKEN}`)
+  assert.equal(JSON.parse(JSON.parse(calls.trigger[0].options.body).text).title, 'Chase the Acme invoice')
+  assertNoRoutineSecrets(response)
+})
